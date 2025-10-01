@@ -1,8 +1,37 @@
+# Virtual Environment
 venv/
+env/
+ENV/
+
+# Environment variables
 .env
+.env.local
+
+# Python
 *.pyc
 __pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Data files (don't commit large CSVs or user data)
+data/*.csv
+data/usage/
+data/results/
 logs/
-*.csv
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
 .DS_Store
 
+# Database
+*.db
+*.sqlite
+
+# Testing
+.pytest_cache/
+htmlcov/
+.coverage

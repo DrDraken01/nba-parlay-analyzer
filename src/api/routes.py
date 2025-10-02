@@ -20,12 +20,12 @@ tracker = ResultsTracker()
 @router.post("/analyze-leg", response_model=dict)
 async def analyze_leg(
     leg: LegInput,
-    user_id: str = Depends(get_current_user)
+    user: dict = Depends(get_current_user)
 ):
     """
-    Analyze a single parlay leg
-    Requires authentication and respects rate limits
+    Analyze single parlay leg
     """
+    user_id = user['email'] # Use email as identifier for limiter
     # Check rate limit
     can_use = limiter.check_can_analyze(user_id, is_authenticated=True)
     

@@ -30,11 +30,11 @@ class EnhancedStatsCalculator:
             self.gamelogs = self.gamelogs[self.gamelogs['PTS'] != 'Did Not Play']
             self.gamelogs = self.gamelogs[self.gamelogs['PTS'] != 'Did Not Dress']
             
-            #remove summary/total rows (they have NaN dates)
+            # Remove summary/total rows (they have NaN dates)
             self.gamelogs = self.gamelogs[self.gamelogs['Date'].notna()]
 
-            # Now convert to numeric
-            numeric_cols = ['PTS', 'AST', 'TRB', '3P', 'STL', 'BLK', 'MP']
+            # Now convert to numeric - include TOV (turnovers)
+            numeric_cols = ['PTS', 'AST', 'TRB', '3P', 'STL', 'BLK', 'TOV', 'MP']
             for col in numeric_cols:
                 if col in self.gamelogs.columns:
                     self.gamelogs[col] = pd.to_numeric(self.gamelogs[col], errors='coerce')
@@ -75,8 +75,8 @@ class EnhancedStatsCalculator:
             'timeframe': f'Last {last_n_games} games' if last_n_games else 'Full season'
         }
         
-        # Calculate mean and std for each stat
-        for stat in ['PTS', 'AST', 'TRB', '3P', 'STL', 'BLK']:
+        # Calculate mean and std for each stat (including TOV now)
+        for stat in ['PTS', 'AST', 'TRB', '3P', 'STL', 'BLK', 'TOV']:
             if stat in player_games.columns:
                 values = player_games[stat].dropna()
                 if len(values) > 0:
@@ -108,7 +108,7 @@ class EnhancedStatsCalculator:
         
         Args:
             player_name: Player's full name
-            stat: Stat name (e.g., 'PTS', 'AST')
+            stat: Stat name (e.g., 'PTS', 'AST', 'TOV')
             window: Number of games
             
         Returns:
@@ -155,7 +155,6 @@ class EnhancedStatsCalculator:
             'difference': round(difference, 2),
             'trend': 'HOT 🔥' if difference > 2 else 'COLD ❄️' if difference < -2 else 'STEADY'
         }
-
 
 # Test the enhanced calculator
 if __name__ == "__main__":

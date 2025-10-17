@@ -1,37 +1,52 @@
-# Virtual Environment
-venv/
-env/
-ENV/
-
-# Environment variables
-.env
-.env.local
-
 # Python
-*.pyc
 __pycache__/
 *.py[cod]
 *$py.class
 *.so
+.Python
+venv/
+env/
+ENV/
 
-# Data files (don't commit large CSVs or user data)
+# Node.js
+node_modules/
+.next/
+out/
+dist/
+build/
+
+# Environment variables
+.env
+.env.local
+.env.production.local
+
+# Data files (CSVs are large!)
 data/*.csv
-data/usage/
-data/results/
+data/*_progress.csv
+data/*_backup.csv
+
+# Logs
 logs/
+*.log
 
 # IDE
 .vscode/
 .idea/
 *.swp
 *.swo
+
+# OS
 .DS_Store
+Thumbs.db
 
 # Database
 *.db
 *.sqlite
 
-# Testing
-.pytest_cache/
-htmlcov/
-.coverage
+# Sensitive
+*.pem
+*.key
+# Usage tracking and results (temporary files)
+data/usage/
+data/results/
+*.json

@@ -1,338 +1,311 @@
 """
-Basketball-Reference Data Scraper
-Collects player stats, game logs, and team data from Basketball-Reference.com
+NBA Stats API Scraper
+Gets game logs for all active NBA players (~450 players in 5-10 minutes)
 
-Learning Goals:
-- Web scraping with BeautifulSoup
-- Rate limiting and respectful scraping
-- Data cleaning and validation
-- Database insertion patterns
+Usage:
+    python scraper.py
 """
 
-import requests
-from bs4 import BeautifulSoup
-from io import StringIO
 import pandas as pd
+from nba_api.stats.endpoints import playergamelog, commonallplayers
+from nba_api.stats.static import teams
 import time
-from datetime import datetime
-import psycopg2
-from psycopg2.extras import execute_batch
-import re
-from typing import Dict, List, Optional
 import logging
 import os
-from dotenv import load_dotenv
 
-# Set up logging
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler('logs/scraper.log'),
-        logging.StreamHandler()
-    ]
+    format='%(asctime)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
 
-load_dotenv()
 
-
-class BasketballReferenceScraper:
-    """
-    Main scraper class for Basketball-Reference data.
+class NBAGameLogScraper:
+    """Scrapes game logs for all active NBA players."""
     
-    Important: Basketball-Reference requests that scrapers:
-    - Use rate limiting (3 seconds between requests)
-    - Include a User-Agent header
-    - Don't overwhelm their servers
-    """
-    
-    BASE_URL = "https://www.basketball-reference.com"
+    CURRENT_SEASON = "2024-25"
     
     def __init__(self):
-        """Initialize scraper with database connection."""
-        self.conn = psycopg2.connect(
-            dbname=os.getenv('DB_NAME'),
-            user=os.getenv('DB_USER'),
-            password=os.getenv('DB_PASSWORD', ''),
-            host=os.getenv('DB_HOST'),
-            port=os.getenv('DB_PORT', '5432')
-        )
-        self.session = requests.Session()
-        # Being a good internet citizen with User-Agent
-        self.session.headers.update({
-            'User-Agent': 'NBA-Parlay-Analyzer/1.0 (Educational Project)'
-        })
+        """Initialize scraper."""
+        self.all_teams = teams.get_teams()
+        self.team_abbr_map = {team['id']: team['abbreviation'] for team in self.all_teams}
     
-    def _rate_limit(self):
-        """Sleep to respect Basketball-Reference's rate limits."""
-        time.sleep(3)  # 3 seconds between requests
-    
-    def scrape_player_season_stats(self, season: int = 2025) -> pd.DataFrame:
+    def get_all_active_players(self):
         """
-        Scrape all player stats for a given season.
-        
-        Args:
-            season: NBA season year (2025 means 2024-25 season)
+        Get all active NBA players from the official API.
         
         Returns:
-            DataFrame with player stats
+            List of dicts with player id, name, team_id
         """
-        logger.info(f"Scraping player stats for {season-1}-{season} season")
-        
-        url = f"{self.BASE_URL}/leagues/NBA_{season}_per_game.html"
+        logger.info("Fetching all active players from NBA API...")
         
         try:
-            response = self.session.get(url)
-            response.raise_for_status()
-            self._rate_limit()
+            all_players_data = commonallplayers.CommonAllPlayers(
+                season=self.CURRENT_SEASON,
+                is_only_current_season=1
+            ).get_data_frames()[0]
             
-            soup = BeautifulSoup(response.content, 'html.parser')
+            active_players = all_players_data[all_players_data['ROSTERSTATUS'] == 1]
             
-            # Find the stats table
-            table = soup.find('table', {'id': 'per_game_stats'})
+            players_list = []
+            for _, player in active_players.iterrows():
+                players_list.append({
+                    'id': player['PERSON_ID'],
+                    'name': player['DISPLAY_FIRST_LAST'],
+                    'team_id': player['TEAM_ID']
+                })
             
-            if not table:
-                logger.error(f"Could not find stats table for season {season}")
+            logger.info(f"✅ Found {len(players_list)} active players")
+            return players_list
+            
+        except Exception as e:
+            logger.error(f"Error fetching players: {e}")
+            return []
+    
+    def get_player_gamelog(self, player_id, player_name):
+        """
+        Get game log for a specific player.
+        
+        Args:
+            player_id: NBA player ID
+            player_name: Player's full name
+            
+        Returns:
+            DataFrame with game logs
+        """
+        try:
+            gamelog = playergamelog.PlayerGameLog(
+                player_id=player_id,
+                season=self.CURRENT_SEASON
+            )
+            
+            df = gamelog.get_data_frames()[0]
+            
+            if df.empty:
                 return pd.DataFrame()
             
-            # Extract data using pandas with StringIO
-            from io import StringIO
-            df = pd.read_html(StringIO(str(table)))[0]
+            df['player_name'] = player_name
             
-            # Clean column names (pandas adds multi-level headers)
-            if isinstance(df.columns, pd.MultiIndex):
-                df.columns = df.columns.get_level_values(-1)
+            # Extract opponent - handle both "vs." and "@" formats
+            # "LAL vs. BOS" -> "BOS", "LAL @ BOS" -> "BOS"
+            df['Opp'] = df['MATCHUP'].apply(lambda x: 
+                x.split('vs. ')[-1] if 'vs.' in str(x) 
+                else x.split('@ ')[-1] if '@' in str(x) 
+                else None
+            )
             
-            # Remove header rows that appear in the middle of data
-            df = df[df['Player'] != 'Player']
+            # Rename columns to match analyzer format
+            df = df.rename(columns={
+                'GAME_DATE': 'Date',
+                'PTS': 'PTS',
+                'AST': 'AST',
+                'REB': 'TRB',
+                'FG3M': '3P',
+                'STL': 'STL',
+                'BLK': 'BLK',
+                'TOV': 'TOV',
+                'MIN': 'MP'
+            })
             
-            # Drop unnamed columns
-            df = df.loc[:, ~df.columns.str.contains('^Unnamed')]
+            # Keep only needed columns
+            keep_cols = ['player_name', 'Date', 'Opp', 'PTS', 'AST', 'TRB', '3P', 'STL', 'BLK', 'TOV', 'MP']
+            df = df[[col for col in keep_cols if col in df.columns]]
             
-            # Add season column
-            df['season'] = season
-            
-            logger.info(f"Successfully scraped {len(df)} player records")
             return df
             
         except Exception as e:
-            logger.error(f"Error scraping player stats: {e}")
+            logger.error(f"  ❌ Error for {player_name}: {e}")
             return pd.DataFrame()
     
-    def scrape_player_game_log(self, player_id: str, season: int = 2025) -> pd.DataFrame:
+    def scrape_all(self, output_file='data/gamelogs_2024.csv'):
         """
-        Scrape individual game logs for a specific player.
+        Main method: Scrape game logs for ALL active players.
         
         Args:
-            player_id: Basketball-Reference player ID (e.g., 'curryst01')
-            season: NBA season
-        
-        Returns:
-            DataFrame with game-by-game stats
+            output_file: Where to save the CSV (default: data/gamelogs_2024.csv)
         """
-        logger.info(f"Scraping game log for player {player_id}, season {season}")
+        logger.info("=" * 80)
+        logger.info("🏀 NBA GAMELOG SCRAPER")
+        logger.info("=" * 80)
         
-        url = f"{self.BASE_URL}/players/{player_id[0]}/{player_id}/gamelog/{season}"
+        # Step 1: Get all active players
+        all_players = self.get_all_active_players()
         
-        try:
-            response = self.session.get(url)
-            response.raise_for_status()
-            self._rate_limit()
-            
-            soup = BeautifulSoup(response.content, 'html.parser')
-            table = soup.find('table', {'id': 'pgl_basic'}) or soup.find('table', {'id': 'player_game_log_reg'})
-            
-            if not table:
-                logger.warning(f"No game log found for {player_id}")
-                return pd.DataFrame()
-            
-            # Use pandas to parse
-            df = pd.read_html(StringIO(str(table)))[0]
-            
-            # Clean multi-level columns
-            if isinstance(df.columns, pd.MultiIndex):
-                df.columns = df.columns.droplevel()
-            
-            # Remove header rows
-            df = df[df['Date'] != 'Date']
-            
-            # Add metadata
-            df['player_id'] = player_id
-            df['season'] = season
-            
-            logger.info(f"Scraped {len(df)} games for {player_id}")
-            return df
-            
-        except Exception as e:
-            logger.error(f"Error scraping game log for {player_id}: {e}")
-            return pd.DataFrame()
-    
-    def clean_player_stats(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Clean and normalize player stats data."""
-        if df.empty:
-            return df
-        
-        df = df.copy()
-        
-        # Convert numeric columns
-        numeric_cols = ['Age', 'G', 'GS', 'MP', 'FG', 'FGA', 'FG%', 
-                       '3P', '3PA', '3P%', '2P', '2PA', '2P%',
-                       'eFG%', 'FT', 'FTA', 'FT%', 'ORB', 'DRB', 
-                       'TRB', 'AST', 'STL', 'BLK', 'TOV', 'PF', 'PTS']
-        
-        for col in numeric_cols:
-            if col in df.columns:
-                df[col] = pd.to_numeric(df[col], errors='coerce')
-        
-        # Clean player names
-        if 'Player' in df.columns:
-            df['Player'] = df['Player'].str.strip()
-        
-        # Standardize team abbreviations
-        team_mapping = {
-            'CHO': 'CHA',
-            'BRK': 'BKN',
-            'PHO': 'PHX',
-        }
-        
-        if 'Tm' in df.columns:
-            df['Tm'] = df['Tm'].replace(team_mapping)
-        
-        return df
-    
-    def save_players_to_db(self, df: pd.DataFrame):
-        """Insert player data into database."""
-        if df.empty:
-            logger.warning("No player data to insert")
+        if not all_players:
+            logger.error("❌ Could not fetch players list")
             return
         
-        cursor = self.conn.cursor()
+        logger.info(f"\n📊 Fetching game logs for {len(all_players)} players...")
+        logger.info("⏱️ Estimated time: 5-10 minutes\n")
         
-        try:
-            inserted = 0
-            for _, row in df.iterrows():
-                # Get team_id from database
-                cursor.execute(
-                    "SELECT id FROM teams WHERE abbreviation = %s",
-                    (row.get('Tm'),)
-                )
-                team_result = cursor.fetchone()
-                team_id = team_result[0] if team_result else None
+        all_gamelogs = []
+        failed_players = []
+        
+        # Step 2: Get game logs for each player
+        for i, player in enumerate(all_players, 1):
+            logger.info(f"[{i}/{len(all_players)}] {player['name']}")
+            
+            try:
+                gamelog = self.get_player_gamelog(player['id'], player['name'])
                 
-                # Insert or update player
-                cursor.execute("""
-                    INSERT INTO players (name, team_id, position, is_active)
-                    VALUES (%s, %s, %s, TRUE)
-                    ON CONFLICT (basketball_reference_id) 
-                    DO UPDATE SET 
-                        name = EXCLUDED.name,
-                        team_id = EXCLUDED.team_id,
-                        position = EXCLUDED.position
-                    RETURNING id
-                """, (
-                    row.get('Player'),
-                    team_id,
-                    row.get('Pos')
-                ))
-                inserted += 1
-            
-            self.conn.commit()
-            logger.info(f"✅ Successfully inserted/updated {inserted} players")
-            
-        except Exception as e:
-            self.conn.rollback()
-            logger.error(f"Error saving players: {e}")
-            raise
-        finally:
-            cursor.close()
-    
-    def get_team_id(self, team_abbr: str) -> Optional[int]:
-        """Get team ID from abbreviation."""
-        cursor = self.conn.cursor()
-        cursor.execute(
-            "SELECT id FROM teams WHERE abbreviation = %s",
-            (team_abbr,)
-        )
-        result = cursor.fetchone()
-        cursor.close()
-        return result[0] if result else None
-    
-    def close(self):
-        """Close database connection."""
-        if self.conn:
-            self.conn.close()
-            logger.info("Database connection closed")
-
-
-# Test functions
-def test_scrape_current_season():
-    """Test scraping current season player stats."""
-    scraper = BasketballReferenceScraper()
-    
-    try:
-        # Scrape current season
-        df = scraper.scrape_player_season_stats(season=2025)
+                if not gamelog.empty:
+                    all_gamelogs.append(gamelog)
+                    logger.info(f"  ✅ {len(gamelog)} games")
+                else:
+                    failed_players.append(player['name'])
+                    logger.info(f"  ⚠️ No games found")
+                
+                # Rate limiting (be nice to NBA's servers)
+                time.sleep(0.6)
+                
+                # Save progress every 100 players
+                if i % 100 == 0:
+                    self._save_progress(all_gamelogs, output_file)
+                    logger.info(f"\n💾 Progress saved: {i}/{len(all_players)}\n")
+                
+            except Exception as e:
+                logger.error(f"  ❌ Failed: {e}")
+                failed_players.append(player['name'])
+                time.sleep(2)  # Extra delay on error
         
-        if not df.empty:
-            # Clean data
-            df_clean = scraper.clean_player_stats(df)
+        # Step 3: Combine and save final result
+        if all_gamelogs:
+            logger.info("\n✅ Combining and saving final data...")
+            final_df = pd.concat(all_gamelogs, ignore_index=True)
             
-            # Save to CSV for inspection
-            df_clean.to_csv('data/players_2024_25.csv', index=False)
+            # Create data directory if it doesn't exist
+            os.makedirs('data', exist_ok=True)
             
-            print(f"\n✅ Scraped {len(df_clean)} players")
-            print(f"📁 Saved to data/players_2024_25.csv")
-            print(f"\nTop 5 scorers:")
-            top_scorers = df_clean.nlargest(5, 'PTS')[['Player', 'Team', 'PTS', 'AST', 'TRB']]
-            print(top_scorers.to_string(index=False))
+            # Save to CSV
+            final_df.to_csv(output_file, index=False)
             
-            return df_clean
-        else:
-            print("❌ No data scraped")
+            # Print summary
+            logger.info("=" * 80)
+            logger.info("✅ SCRAPING COMPLETE!")
+            logger.info("=" * 80)
+            logger.info(f"📊 Total players attempted: {len(all_players)}")
+            logger.info(f"✅ Successfully scraped: {len(all_gamelogs)}")
+            logger.info(f"❌ Failed: {len(failed_players)}")
+            logger.info(f"📁 Saved to: {output_file}")
+            logger.info(f"📈 Total games: {len(final_df):,}")
+            logger.info(f"👥 Unique players: {final_df['player_name'].nunique()}")
             
-    finally:
-        scraper.close()
-
-
-def test_scrape_player_gamelog():
-    """Test scraping a specific player's game log."""
-    scraper = BasketballReferenceScraper()
-    
-    try:
-        # Scrape Stephen Curry's game log
-        df = scraper.scrape_player_game_log('curryst01', season=2025)
-        
-        if not df.empty:
-            df.to_csv('data/curry_gamelog_2024_25.csv', index=False)
+            # Show sample
+            logger.info("\n📋 Sample of data:")
+            print(final_df.head(5).to_string(index=False))
             
-            print(f"\n✅ Scraped {len(df)} games for Stephen Curry")
-            print(f"📁 Saved to data/curry_gamelog_2024_25.csv")
+            if failed_players and len(failed_players) < 20:
+                logger.info(f"\n⚠️ Players with no data: {', '.join(failed_players)}")
             
-            # Show recent games
-            print(f"\nLast 5 games:")
-            recent = df.head(5)[['Date', 'Opp', 'PTS', 'AST', 'TRB']]
-            print(recent.to_string(index=False))
+            # Verify key players
+            self._verify_key_players(final_df)
             
         else:
-            print("❌ No game log found")
+            logger.error("❌ No data collected!")
+    
+    def _save_progress(self, gamelogs, output_file):
+        """Save progress checkpoint to avoid losing data."""
+        if gamelogs:
+            temp_df = pd.concat(gamelogs, ignore_index=True)
+            temp_file = output_file.replace('.csv', '_progress.csv')
+            temp_df.to_csv(temp_file, index=False)
+    
+    def _verify_key_players(self, df):
+        """Check if key players are in the data."""
+        key_players = ['LeBron James', 'Anthony Edwards', 'Stephen Curry', 'Luka Doncic']
+        
+        logger.info("\n🔍 Verifying key players:")
+        for player in key_players:
+            if player in df['player_name'].values:
+                games = len(df[df['player_name'] == player])
+                logger.info(f"  ✅ {player}: {games} games")
+            else:
+                logger.info(f"  ❌ {player}: NOT FOUND")
+
+
+def verify_existing_data(csv_file='data/gamelogs_2024.csv'):
+    """
+    Verify an existing scraped CSV file.
+    
+    Args:
+        csv_file: Path to the CSV file to verify
+    """
+    if not os.path.exists(csv_file):
+        print(f"❌ File not found: {csv_file}")
+        return
+    
+    df = pd.read_csv(csv_file)
+    
+    print("\n" + "=" * 60)
+    print("📊 DATA VERIFICATION")
+    print("=" * 60)
+    print(f"Total rows: {len(df):,}")
+    print(f"Unique players: {df['player_name'].nunique()}")
+    print(f"Date range: {df['Date'].min()} to {df['Date'].max()}")
+    print(f"\nColumns: {', '.join(df.columns.tolist())}")
+    
+    print("\n📋 Top 10 players by games logged:")
+    top_players = df['player_name'].value_counts().head(10)
+    for player, games in top_players.items():
+        print(f"  {player}: {games} games")
+    
+    print("\n✅ Sample data:")
+    print(df.head(3).to_string(index=False))
+    
+    # Check for missing data
+    missing = df.isnull().sum()
+    if missing.any():
+        print("\n⚠️ Missing values:")
+        print(missing[missing > 0])
+    else:
+        print("\n✅ No missing values")
+    
+    print("\n" + "=" * 60)
+
+
+def main():
+    """Main function with menu."""
+    print("\n🏀 NBA GAMELOG SCRAPER")
+    print("=" * 60)
+    print("1. Scrape all players (5-10 minutes)")
+    print("2. Verify existing data")
+    print("3. Exit")
+    print("=" * 60)
+    
+    choice = input("\nChoice (1/2/3): ").strip()
+    
+    if choice == '1':
+        print("\n⚠️ This will scrape ~450 active NBA players")
+        print("⏱️ Time required: 5-10 minutes")
+        confirm = input("Proceed? (yes/no): ").lower()
+        
+        if confirm in ['yes', 'y']:
+            scraper = NBAGameLogScraper()
+            scraper.scrape_all()
             
-    finally:
-        scraper.close()
+            print("\n✅ Scraping complete! Verifying data...\n")
+            verify_existing_data()
+        else:
+            print("Cancelled.")
+    
+    elif choice == '2':
+        verify_existing_data()
+    
+    elif choice == '3':
+        print("Goodbye!")
+    
+    else:
+        print("❌ Invalid choice!")
 
 
 if __name__ == "__main__":
-    print("🏀 Basketball-Reference Scraper Test\n")
-    print("=" * 60)
+    # Check if nba-api is installed
+    try:
+        import nba_api
+    except ImportError:
+        print("\n❌ NBA API package not installed!")
+        print("Install it with: pip install nba-api")
+        print("\nThen run this script again.")
+        exit(1)
     
-    # Test 1: Current season stats
-    print("\n📊 Test 1: Scraping current season player stats...")
-    test_scrape_current_season()
-    
-    # Test 2: Player game log
-    print("\n" + "=" * 60)
-    print("\n📊 Test 2: Scraping Stephen Curry's game log...")
-    test_scrape_player_gamelog()
-    
-    print("\n" + "=" * 60)
-    print("✅ All tests complete!")
+    main()

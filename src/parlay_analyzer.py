@@ -23,7 +23,8 @@ class ParlayAnalyzer:
         
         Args:
             player_name: Player's full name
-            stat_type: 'points', 'assists', 'points_assists', etc.
+            stat_type: 'points', 'assists', 'rebounds', 'three_pointers', 'steals', 'blocks', 
+                      'turnovers', 'points_assists', 'points_rebounds_assists'
             line: Betting line
             bet_type: 'over' or 'under'
             
@@ -36,21 +37,28 @@ class ParlayAnalyzer:
         if not season_stats:
             return {'error': f'Player {player_name} not found'}
         
-        # Map stat_type to our data keys
+        # Map stat_type to our data keys (enhanced to include all stat types)
         stat_map = {
             'points': 'pts',
             'assists': 'ast',
             'rebounds': 'trb',
+            'three_pointers': '3p',
+            'steals': 'stl',
+            'blocks': 'blk',
+            'turnovers': 'tov',
             'points_assists': 'pa',
             'points_rebounds_assists': 'pra'
         }
         
-        stat_key = stat_map.get(stat_type, stat_type)
+        stat_key = stat_map.get(stat_type)
+        if not stat_key:
+            return {'error': f'Invalid stat type: {stat_type}. Valid types: {", ".join(stat_map.keys())}'}
+        
         mean_key = f'{stat_key}_mean'
         std_key = f'{stat_key}_std'
         
         if mean_key not in season_stats:
-            return {'error': f'Invalid stat type: {stat_type}'}
+            return {'error': f'No data available for {player_name} - {stat_type}'}
         
         player_stat_avg = season_stats[mean_key]
         player_stat_std = season_stats.get(std_key, player_stat_avg * 0.3)

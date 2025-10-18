@@ -50,3 +50,6 @@ Thumbs.db
 data/usage/
 data/results/
 *.json
+!railway.json
+!package.json
+!tsconfig.json

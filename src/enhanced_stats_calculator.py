@@ -1,6 +1,6 @@
 """
 Enhanced Stats Calculator - Database Version
-Uses Railway PostgreSQL instead of CSV files
+Uses Railway PostgreSQL with DATABASE_URL
 """
 
 import pandas as pd
@@ -23,23 +23,34 @@ class EnhancedStatsCalculator:
     _connection_pool = None
     
     def __init__(self):
-        """Initialize with database connection."""
+        """Initialize with database connection - supports DATABASE_URL."""
         try:
             # Use connection pool for better performance
             if EnhancedStatsCalculator._connection_pool is None:
-                EnhancedStatsCalculator._connection_pool = psycopg2.pool.SimpleConnectionPool(
-                    1, 10,  # min and max connections
-                    dbname=os.getenv('DB_NAME'),
-                    user=os.getenv('DB_USER'),
-                    password=os.getenv('DB_PASSWORD'),
-                    host=os.getenv('DB_HOST'),
-                    port=os.getenv('DB_PORT', '5432')
-                )
+                # Try DATABASE_URL first (Railway standard)
+                database_url = os.getenv('DATABASE_URL')
+                
+                if database_url:
+                    EnhancedStatsCalculator._connection_pool = psycopg2.pool.SimpleConnectionPool(
+                        1, 10,  # min and max connections
+                        database_url
+                    )
+                    logger.info("Connected to database using DATABASE_URL")
+                else:
+                    # Fallback to individual variables
+                    EnhancedStatsCalculator._connection_pool = psycopg2.pool.SimpleConnectionPool(
+                        1, 10,
+                        dbname=os.getenv('DB_NAME'),
+                        user=os.getenv('DB_USER'),
+                        password=os.getenv('DB_PASSWORD'),
+                        host=os.getenv('DB_HOST'),
+                        port=os.getenv('DB_PORT', '5432')
+                    )
+                    logger.info("Connected to database using individual variables")
             
             self.conn = EnhancedStatsCalculator._connection_pool.getconn()
             
             # Load game logs from database - LAZY LOADING
-            # Don't load all data at init - only when needed
             self._gamelogs_cache = None
             logger.info("Database connection established")
             
@@ -61,7 +72,6 @@ class EnhancedStatsCalculator:
         if not self.conn:
             return pd.DataFrame()
         
-        # Optimized query: only select what we need, let DB do the sorting
         query = """
             SELECT 
                 player_name, 
@@ -76,20 +86,15 @@ class EnhancedStatsCalculator:
                 tov, 
                 mp
             FROM game_logs
-            WHERE pts IS NOT NULL  -- Filter at DB level
-            ORDER BY player_name, date DESC  -- Pre-sort for efficient player lookups
+            WHERE pts IS NOT NULL
+            ORDER BY player_name, date DESC
         """
         try:
             df = pd.read_sql(query, self.conn)
-            
-            # Convert date to datetime (more efficient with errors='coerce')
             df['date'] = pd.to_datetime(df['date'], errors='coerce')
             
-            # Ensure numeric columns are numeric (vectorized operation)
             numeric_cols = ['pts', 'ast', 'trb', 'three_p', 'stl', 'blk', 'tov', 'mp']
             df[numeric_cols] = df[numeric_cols].apply(pd.to_numeric, errors='coerce')
-            
-            # Drop rows with NaN in critical columns (already filtered pts at DB level)
             df = df.dropna(subset=['date', 'pts'])
             
             return df
@@ -106,24 +111,20 @@ class EnhancedStatsCalculator:
         if player_games.empty:
             return tuple()
         
-        # Already sorted by date DESC from database query
         if last_n:
             player_games = player_games.head(last_n)
         
-        # Return as tuple of tuples for caching (DataFrames aren't hashable)
         return tuple(player_games.to_records(index=False))
     
     def get_player_stats(self, player_name: str, last_n_games: Optional[int] = None) -> Dict:
         """Get player statistics with real variance - OPTIMIZED."""
         
-        # Try to get from cache first
         cached_games = self._get_player_games_cached(player_name, last_n_games)
         
         if not cached_games:
             logger.warning(f"No game log data for {player_name}")
             return {}
         
-        # Convert back to DataFrame for calculations
         player_games = pd.DataFrame(list(cached_games))
         
         stats = {
@@ -132,19 +133,16 @@ class EnhancedStatsCalculator:
             'timeframe': f'Last {last_n_games} games' if last_n_games else 'Full season'
         }
         
-        # Vectorized calculations for all stats at once (much faster)
         stat_cols = ['pts', 'ast', 'trb', 'three_p', 'stl', 'blk']
         for stat in stat_cols:
             if stat in player_games.columns:
                 values = player_games[stat].dropna()
                 if len(values) > 0:
-                    # Use numpy for faster calculations
                     stats[f'{stat}_mean'] = round(float(np.mean(values)), 2)
                     stats[f'{stat}_std'] = round(float(np.std(values, ddof=1)), 2)
                     stats[f'{stat}_min'] = int(np.min(values))
                     stats[f'{stat}_max'] = int(np.max(values))
         
-        # Calculate combo stats efficiently
         if all(col in player_games.columns for col in ['pts', 'ast']):
             pa = (player_games['pts'] + player_games['ast']).dropna()
             if len(pa) > 0:
@@ -160,13 +158,11 @@ class EnhancedStatsCalculator:
         return stats
     
     def get_rolling_average(self, player_name: str, stat: str, window: int = 10) -> float:
-        """Get rolling average for last N games - uses cached data."""
-        # Reuse the cached method
+        """Get rolling average for last N games."""
         return self.get_player_stats(player_name, last_n_games=window).get(f'{stat}_mean', 0.0)
     
     def compare_recent_vs_season(self, player_name: str, stat: str = 'pts') -> Dict:
-        """Compare recent form vs full season - OPTIMIZED."""
-        # Get both stats in parallel (could be optimized further with threading)
+        """Compare recent form vs full season."""
         season_stats = self.get_player_stats(player_name)
         recent_stats = self.get_player_stats(player_name, last_n_games=10)
         
@@ -178,7 +174,6 @@ class EnhancedStatsCalculator:
         recent_avg = recent_stats.get(stat_key, 0)
         difference = recent_avg - season_avg
         
-        # More granular trend detection
         if difference > 3:
             trend = 'VERY HOT 🔥🔥'
         elif difference > 1.5:
@@ -208,7 +203,7 @@ class EnhancedStatsCalculator:
         self._get_player_games_cached.cache_clear()
     
     def close(self):
-        """Return connection to pool instead of closing."""
+        """Return connection to pool."""
         if self.conn and EnhancedStatsCalculator._connection_pool:
             EnhancedStatsCalculator._connection_pool.putconn(self.conn)
             logger.info("Connection returned to pool")

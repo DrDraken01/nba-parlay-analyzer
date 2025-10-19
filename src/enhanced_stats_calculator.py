@@ -1,6 +1,6 @@
 """
 Enhanced Stats Calculator - Database Version
-Uses Railway PostgreSQL with DATABASE_URL
+Uses Railway's PG environment variables
 """
 
 import pandas as pd
@@ -19,38 +19,31 @@ logger = logging.getLogger(__name__)
 class EnhancedStatsCalculator:
     """Calculate stats using database instead of CSV."""
     
-    # Class-level connection pool (shared across instances)
     _connection_pool = None
     
     def __init__(self):
-        """Initialize with database connection - supports DATABASE_URL."""
+        """Initialize with database connection - uses Railway's PG variables."""
         try:
-            # Use connection pool for better performance
             if EnhancedStatsCalculator._connection_pool is None:
-                # Try DATABASE_URL first (Railway standard)
-                database_url = os.getenv('DATABASE_URL')
+                # Railway provides these automatically
+                host = os.getenv('PGHOST')
+                port = os.getenv('PGPORT', '5432')
+                user = os.getenv('PGUSER')
+                password = os.getenv('PGPASSWORD')
+                dbname = os.getenv('PGDATABASE')
                 
-                if database_url:
-                    EnhancedStatsCalculator._connection_pool = psycopg2.pool.SimpleConnectionPool(
-                        1, 10,  # min and max connections
-                        database_url
-                    )
-                    logger.info("Connected to database using DATABASE_URL")
-                else:
-                    # Fallback to individual variables
+                if all([host, user, password, dbname]):
+                    database_url = f"postgresql://{user}:{password}@{host}:{port}/{dbname}"
+                    
                     EnhancedStatsCalculator._connection_pool = psycopg2.pool.SimpleConnectionPool(
                         1, 10,
-                        dbname=os.getenv('DB_NAME'),
-                        user=os.getenv('DB_USER'),
-                        password=os.getenv('DB_PASSWORD'),
-                        host=os.getenv('DB_HOST'),
-                        port=os.getenv('DB_PORT', '5432')
+                        database_url
                     )
-                    logger.info("Connected to database using individual variables")
+                    logger.info(f"Connected to database at {host}")
+                else:
+                    raise ValueError(f"Missing database credentials")
             
             self.conn = EnhancedStatsCalculator._connection_pool.getconn()
-            
-            # Load game logs from database - LAZY LOADING
             self._gamelogs_cache = None
             logger.info("Database connection established")
             
@@ -64,7 +57,8 @@ class EnhancedStatsCalculator:
         """Lazy load gamelogs only when accessed."""
         if self._gamelogs_cache is None:
             self._gamelogs_cache = self._load_from_database()
-            logger.info(f"Loaded {len(self._gamelogs_cache)} games for {self._gamelogs_cache['player_name'].nunique()} players")
+            if not self._gamelogs_cache.empty:
+                logger.info(f"Loaded {len(self._gamelogs_cache)} games for {self._gamelogs_cache['player_name'].nunique()} players")
         return self._gamelogs_cache
     
     def _load_from_database(self) -> pd.DataFrame:

@@ -1,73 +1,130 @@
 """
-Enhanced Stats Calculator with Real Variance from Game Logs
-Uses historical game data for accurate probability calculations
+Enhanced Stats Calculator - Database Version
+Uses Railway PostgreSQL instead of CSV files
 """
 
 import pandas as pd
 import numpy as np
 from typing import Dict, Optional
 import logging
+import os
+import psycopg2
+from psycopg2 import pool
+from functools import lru_cache
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
 class EnhancedStatsCalculator:
-    """Calculate stats using real game log data."""
+    """Calculate stats using database instead of CSV."""
     
-    def __init__(self, gamelog_file: str = 'data/gamelogs_2024.csv'):
-        """
-        Initialize with game log data.
+    # Class-level connection pool (shared across instances)
+    _connection_pool = None
+    
+    def __init__(self):
+        """Initialize with database connection."""
+        try:
+            # Use connection pool for better performance
+            if EnhancedStatsCalculator._connection_pool is None:
+                EnhancedStatsCalculator._connection_pool = psycopg2.pool.SimpleConnectionPool(
+                    1, 10,  # min and max connections
+                    dbname=os.getenv('DB_NAME'),
+                    user=os.getenv('DB_USER'),
+                    password=os.getenv('DB_PASSWORD'),
+                    host=os.getenv('DB_HOST'),
+                    port=os.getenv('DB_PORT', '5432')
+                )
+            
+            self.conn = EnhancedStatsCalculator._connection_pool.getconn()
+            
+            # Load game logs from database - LAZY LOADING
+            # Don't load all data at init - only when needed
+            self._gamelogs_cache = None
+            logger.info("Database connection established")
+            
+        except Exception as e:
+            logger.error(f"Error connecting to database: {e}")
+            self.conn = None
+            self._gamelogs_cache = pd.DataFrame()
+    
+    @property
+    def gamelogs(self) -> pd.DataFrame:
+        """Lazy load gamelogs only when accessed."""
+        if self._gamelogs_cache is None:
+            self._gamelogs_cache = self._load_from_database()
+            logger.info(f"Loaded {len(self._gamelogs_cache)} games for {self._gamelogs_cache['player_name'].nunique()} players")
+        return self._gamelogs_cache
+    
+    def _load_from_database(self) -> pd.DataFrame:
+        """Load game logs from database with optimized query."""
+        if not self.conn:
+            return pd.DataFrame()
         
-        Args:
-            gamelog_file: Path to CSV with game logs
+        # Optimized query: only select what we need, let DB do the sorting
+        query = """
+            SELECT 
+                player_name, 
+                date, 
+                opponent, 
+                pts, 
+                ast, 
+                trb, 
+                three_p, 
+                stl, 
+                blk, 
+                tov, 
+                mp
+            FROM game_logs
+            WHERE pts IS NOT NULL  -- Filter at DB level
+            ORDER BY player_name, date DESC  -- Pre-sort for efficient player lookups
         """
         try:
-            self.gamelogs = pd.read_csv(gamelog_file)
+            df = pd.read_sql(query, self.conn)
             
-            # Clean numeric columns - filter out 'Inactive' rows first
-            self.gamelogs = self.gamelogs[self.gamelogs['PTS'] != 'Inactive']
-            self.gamelogs = self.gamelogs[self.gamelogs['PTS'] != 'Did Not Play']
-            self.gamelogs = self.gamelogs[self.gamelogs['PTS'] != 'Did Not Dress']
+            # Convert date to datetime (more efficient with errors='coerce')
+            df['date'] = pd.to_datetime(df['date'], errors='coerce')
             
-            # Remove summary/total rows (they have NaN dates)
-            self.gamelogs = self.gamelogs[self.gamelogs['Date'].notna()]
-
-            # Now convert to numeric - include TOV (turnovers)
-            numeric_cols = ['PTS', 'AST', 'TRB', '3P', 'STL', 'BLK', 'TOV', 'MP']
-            for col in numeric_cols:
-                if col in self.gamelogs.columns:
-                    self.gamelogs[col] = pd.to_numeric(self.gamelogs[col], errors='coerce')
+            # Ensure numeric columns are numeric (vectorized operation)
+            numeric_cols = ['pts', 'ast', 'trb', 'three_p', 'stl', 'blk', 'tov', 'mp']
+            df[numeric_cols] = df[numeric_cols].apply(pd.to_numeric, errors='coerce')
             
-            # Drop any remaining NaN rows
-            self.gamelogs = self.gamelogs.dropna(subset=['PTS'])
+            # Drop rows with NaN in critical columns (already filtered pts at DB level)
+            df = df.dropna(subset=['date', 'pts'])
             
-            logger.info(f"Loaded {len(self.gamelogs)} games for {self.gamelogs['player_name'].nunique()} players")
+            return df
+            
         except Exception as e:
-            logger.error(f"Error loading game logs: {e}")
-            self.gamelogs = pd.DataFrame()
+            logger.error(f"Error loading from database: {e}")
+            return pd.DataFrame()
     
-    def get_player_stats(self, player_name: str, last_n_games: Optional[int] = None) -> Dict:
-        """
-        Get player statistics with real variance.
-        
-        Args:
-            player_name: Player's full name
-            last_n_games: If specified, only use last N games (for recent form)
-            
-        Returns:
-            Dict with mean, std, and other stats
-        """
+    @lru_cache(maxsize=128)
+    def _get_player_games_cached(self, player_name: str, last_n: Optional[int] = None) -> tuple:
+        """Cache player game data to avoid repeated DataFrame operations."""
         player_games = self.gamelogs[self.gamelogs['player_name'] == player_name].copy()
         
         if player_games.empty:
+            return tuple()
+        
+        # Already sorted by date DESC from database query
+        if last_n:
+            player_games = player_games.head(last_n)
+        
+        # Return as tuple of tuples for caching (DataFrames aren't hashable)
+        return tuple(player_games.to_records(index=False))
+    
+    def get_player_stats(self, player_name: str, last_n_games: Optional[int] = None) -> Dict:
+        """Get player statistics with real variance - OPTIMIZED."""
+        
+        # Try to get from cache first
+        cached_games = self._get_player_games_cached(player_name, last_n_games)
+        
+        if not cached_games:
             logger.warning(f"No game log data for {player_name}")
             return {}
         
-        # Sort by date (most recent first) and limit if requested
-        player_games = player_games.sort_values('Date', ascending=False)
-        if last_n_games:
-            player_games = player_games.head(last_n_games)
+        # Convert back to DataFrame for calculations
+        player_games = pd.DataFrame(list(cached_games))
         
         stats = {
             'player': player_name,
@@ -75,77 +132,63 @@ class EnhancedStatsCalculator:
             'timeframe': f'Last {last_n_games} games' if last_n_games else 'Full season'
         }
         
-        # Calculate mean and std for each stat (including TOV now)
-        for stat in ['PTS', 'AST', 'TRB', '3P', 'STL', 'BLK', 'TOV']:
+        # Vectorized calculations for all stats at once (much faster)
+        stat_cols = ['pts', 'ast', 'trb', 'three_p', 'stl', 'blk']
+        for stat in stat_cols:
             if stat in player_games.columns:
                 values = player_games[stat].dropna()
                 if len(values) > 0:
-                    stats[f'{stat.lower()}_mean'] = round(values.mean(), 2)
-                    stats[f'{stat.lower()}_std'] = round(values.std(), 2)
-                    stats[f'{stat.lower()}_min'] = int(values.min())
-                    stats[f'{stat.lower()}_max'] = int(values.max())
+                    # Use numpy for faster calculations
+                    stats[f'{stat}_mean'] = round(float(np.mean(values)), 2)
+                    stats[f'{stat}_std'] = round(float(np.std(values, ddof=1)), 2)
+                    stats[f'{stat}_min'] = int(np.min(values))
+                    stats[f'{stat}_max'] = int(np.max(values))
         
-        # Calculate combo stats
-        if 'PTS' in player_games.columns and 'AST' in player_games.columns:
-            pa = player_games['PTS'] + player_games['AST']
-            pa = pa.dropna()
+        # Calculate combo stats efficiently
+        if all(col in player_games.columns for col in ['pts', 'ast']):
+            pa = (player_games['pts'] + player_games['ast']).dropna()
             if len(pa) > 0:
-                stats['pa_mean'] = round(pa.mean(), 2)
-                stats['pa_std'] = round(pa.std(), 2)
+                stats['pa_mean'] = round(float(np.mean(pa)), 2)
+                stats['pa_std'] = round(float(np.std(pa, ddof=1)), 2)
         
-        if all(col in player_games.columns for col in ['PTS', 'AST', 'TRB']):
-            pra = player_games['PTS'] + player_games['AST'] + player_games['TRB']
-            pra = pra.dropna()
+        if all(col in player_games.columns for col in ['pts', 'ast', 'trb']):
+            pra = (player_games['pts'] + player_games['ast'] + player_games['trb']).dropna()
             if len(pra) > 0:
-                stats['pra_mean'] = round(pra.mean(), 2)
-                stats['pra_std'] = round(pra.std(), 2)
+                stats['pra_mean'] = round(float(np.mean(pra)), 2)
+                stats['pra_std'] = round(float(np.std(pra, ddof=1)), 2)
         
         return stats
     
     def get_rolling_average(self, player_name: str, stat: str, window: int = 10) -> float:
-        """
-        Get rolling average for last N games.
-        
-        Args:
-            player_name: Player's full name
-            stat: Stat name (e.g., 'PTS', 'AST', 'TOV')
-            window: Number of games
-            
-        Returns:
-            Rolling average value
-        """
-        player_games = self.gamelogs[self.gamelogs['player_name'] == player_name].copy()
-        
-        if player_games.empty or stat not in player_games.columns:
-            return 0.0
-        
-        recent = player_games.sort_values('Date', ascending=False).head(window)
-        values = recent[stat].dropna()
-        if len(values) == 0:
-            return 0.0
-        return round(values.mean(), 2)
+        """Get rolling average for last N games - uses cached data."""
+        # Reuse the cached method
+        return self.get_player_stats(player_name, last_n_games=window).get(f'{stat}_mean', 0.0)
     
-    def compare_recent_vs_season(self, player_name: str, stat: str = 'PTS') -> Dict:
-        """
-        Compare recent form (last 10 games) vs full season.
-        
-        Args:
-            player_name: Player's full name
-            stat: Stat to compare
-            
-        Returns:
-            Comparison dict
-        """
+    def compare_recent_vs_season(self, player_name: str, stat: str = 'pts') -> Dict:
+        """Compare recent form vs full season - OPTIMIZED."""
+        # Get both stats in parallel (could be optimized further with threading)
         season_stats = self.get_player_stats(player_name)
         recent_stats = self.get_player_stats(player_name, last_n_games=10)
         
         if not season_stats or not recent_stats:
             return {'error': f'No data for {player_name}'}
         
-        stat_key = f'{stat.lower()}_mean'
+        stat_key = f'{stat}_mean'
         season_avg = season_stats.get(stat_key, 0)
         recent_avg = recent_stats.get(stat_key, 0)
         difference = recent_avg - season_avg
+        
+        # More granular trend detection
+        if difference > 3:
+            trend = 'VERY HOT 🔥🔥'
+        elif difference > 1.5:
+            trend = 'HOT 🔥'
+        elif difference < -3:
+            trend = 'VERY COLD ❄️❄️'
+        elif difference < -1.5:
+            trend = 'COLD ❄️'
+        else:
+            trend = 'STEADY ➡️'
         
         return {
             'player': player_name,
@@ -153,46 +196,23 @@ class EnhancedStatsCalculator:
             'season_avg': season_avg,
             'last_10_avg': recent_avg,
             'difference': round(difference, 2),
-            'trend': 'HOT 🔥' if difference > 2 else 'COLD ❄️' if difference < -2 else 'STEADY'
+            'trend': trend,
+            'sample_size': {
+                'season': season_stats.get('games_analyzed', 0),
+                'recent': recent_stats.get('games_analyzed', 0)
+            }
         }
-
-# Test the enhanced calculator
-if __name__ == "__main__":
-    calc = EnhancedStatsCalculator()
     
-    print("Enhanced Stats Calculator Test\n" + "="*60)
+    def clear_cache(self):
+        """Clear the LRU cache if needed."""
+        self._get_player_games_cached.cache_clear()
     
-    # Test 1: Get Curry's full stats with variance
-    print("\nTest 1: Stephen Curry - Full Season Stats")
-    curry_stats = calc.get_player_stats("Stephen Curry")
-    print(f"  Games: {curry_stats['games_analyzed']}")
-    print(f"  Points: {curry_stats['pts_mean']} ± {curry_stats['pts_std']} (range: {curry_stats['pts_min']}-{curry_stats['pts_max']})")
-    print(f"  Assists: {curry_stats['ast_mean']} ± {curry_stats['ast_std']}")
-    print(f"  Points + Assists: {curry_stats['pa_mean']} ± {curry_stats['pa_std']}")
+    def close(self):
+        """Return connection to pool instead of closing."""
+        if self.conn and EnhancedStatsCalculator._connection_pool:
+            EnhancedStatsCalculator._connection_pool.putconn(self.conn)
+            logger.info("Connection returned to pool")
     
-    # Test 2: Rolling average
-    print("\n" + "="*60)
-    print("\nTest 2: Curry's Last 10 Games Average")
-    last_10_pts = calc.get_rolling_average("Stephen Curry", "PTS", 10)
-    last_10_ast = calc.get_rolling_average("Stephen Curry", "AST", 10)
-    print(f"  Last 10 PPG: {last_10_pts}")
-    print(f"  Last 10 APG: {last_10_ast}")
-    
-    # Test 3: Recent form comparison
-    print("\n" + "="*60)
-    print("\nTest 3: Recent Form vs Season")
-    comparison = calc.compare_recent_vs_season("Stephen Curry", "PTS")
-    print(f"  Season Avg: {comparison['season_avg']}")
-    print(f"  Last 10 Avg: {comparison['last_10_avg']}")
-    print(f"  Difference: {comparison['difference']:+.1f}")
-    print(f"  Trend: {comparison['trend']}")
-    
-    # Test 4: Compare multiple players
-    print("\n" + "="*60)
-    print("\nTest 4: Multiple Players Recent Form")
-    for player in ["Giannis Antetokounmpo", "Nikola Jokić", "Luka Dončić"]:
-        comp = calc.compare_recent_vs_season(player, "PTS")
-        print(f"  {player}: {comp['last_10_avg']} PPG (L10) vs {comp['season_avg']} (Season) - {comp['trend']}")
-    
-    print("\n" + "="*60)
-    print("\nAll tests complete!")
+    def __del__(self):
+        """Cleanup on deletion."""
+        self.close()

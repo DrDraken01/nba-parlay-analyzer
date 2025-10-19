@@ -20,7 +20,9 @@ class EnhancedStatsCalculator:
     """Calculate stats using database instead of CSV."""
     
     _connection_pool = None
-    
+    _pool_version = "v3"
+    _current_version = None
+
     def __init__(self):
         """Initialize with database connection - uses Railway's PG variables."""
         try:

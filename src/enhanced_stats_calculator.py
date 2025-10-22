@@ -1,6 +1,6 @@
 """
 Enhanced Stats Calculator - Database Version
-Uses Railway's PG environment variables
+Simplified for reliability - no complex caching
 """
 
 import pandas as pd
@@ -10,29 +10,38 @@ import logging
 import os
 import psycopg2
 from psycopg2 import pool
-from functools import lru_cache
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
 class EnhancedStatsCalculator:
-    """Calculate stats using database instead of CSV."""
+    """Calculate stats using database - simplified and reliable."""
     
     _connection_pool = None
-    _pool_version = "v3"
+    _pool_version = "v4"
     _current_version = None
-
+    
     def __init__(self):
-        """Initialize with database connection - uses Railway's PG variables."""
+        """Initialize with database connection."""
         try:
-            if EnhancedStatsCalculator._connection_pool is None:
-                # Railway provides these automatically
+            if (EnhancedStatsCalculator._connection_pool is None or 
+                EnhancedStatsCalculator._current_version != self._pool_version):
+                
+                if EnhancedStatsCalculator._connection_pool:
+                    logger.info("Closing old connection pool")
+                    try:
+                        EnhancedStatsCalculator._connection_pool.closeall()
+                    except:
+                        pass
+                
                 host = os.getenv('PGHOST')
                 port = os.getenv('PGPORT', '5432')
                 user = os.getenv('PGUSER')
                 password = os.getenv('PGPASSWORD')
                 dbname = os.getenv('PGDATABASE')
+                
+                logger.info(f"Creating new connection pool (version {self._pool_version})")
                 
                 if all([host, user, password, dbname]):
                     database_url = f"postgresql://{user}:{password}@{host}:{port}/{dbname}"
@@ -41,9 +50,15 @@ class EnhancedStatsCalculator:
                         1, 10,
                         database_url
                     )
-                    logger.info(f"Connected to database at {host}")
+                    EnhancedStatsCalculator._current_version = self._pool_version
+                    logger.info(f"Successfully connected to database at {host}")
                 else:
-                    raise ValueError(f"Missing database credentials")
+                    missing = []
+                    if not host: missing.append("PGHOST")
+                    if not user: missing.append("PGUSER")
+                    if not password: missing.append("PGPASSWORD")
+                    if not dbname: missing.append("PGDATABASE")
+                    raise ValueError(f"Missing database credentials: {', '.join(missing)}")
             
             self.conn = EnhancedStatsCalculator._connection_pool.getconn()
             self._gamelogs_cache = None
@@ -51,6 +66,8 @@ class EnhancedStatsCalculator:
             
         except Exception as e:
             logger.error(f"Error connecting to database: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
             self.conn = None
             self._gamelogs_cache = pd.DataFrame()
     
@@ -64,7 +81,7 @@ class EnhancedStatsCalculator:
         return self._gamelogs_cache
     
     def _load_from_database(self) -> pd.DataFrame:
-        """Load game logs from database with optimized query."""
+        """Load game logs from database."""
         if not self.conn:
             logger.error("No database connection available")
             return pd.DataFrame()
@@ -88,67 +105,49 @@ class EnhancedStatsCalculator:
         """
         try:
             df = pd.read_sql(query, self.conn)
-
-            # Debug: Print first few rows
-            logger.info(f"Loaded {len(df)} rows from database")
-            if not df.empty:
-                logger.info(f"Sample player names: {df['player_name'].unique()[:5]}")
-                
             df['date'] = pd.to_datetime(df['date'], errors='coerce')
             
             numeric_cols = ['pts', 'ast', 'trb', 'three_p', 'stl', 'blk', 'tov', 'mp']
             df[numeric_cols] = df[numeric_cols].apply(pd.to_numeric, errors='coerce')
             df = df.dropna(subset=['date', 'pts'])
             
+            logger.info(f"DEBUG: Sample players from DB: {df['player_name'].unique()[:10].tolist()}")
+            
             return df
             
         except Exception as e:
             logger.error(f"Error loading from database: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
             return pd.DataFrame()
     
-    @lru_cache(maxsize=128)
-    def _get_player_games_cached(self, player_name: str, last_n: Optional[int] = None) -> tuple:
-        """Cache player game data to avoid repeated DataFrame operations."""
-        player_games = self.gamelogs[self.gamelogs['player_name'] == player_name].copy()
-        logger.info(f"DEBUG: Found {len(player_games)} games for '{player_name}'")
-
-        if player_games.empty:
-            logger.warning(f"DEBUG: No games found. Trying exact match...")
-            player_games = self.gamelogs[self.gamelogs['player_name'] == player_name]
-            logger.info(f"DEBUG: Exact match found {len(player_games)} games")
-
-        if player_games.empty:
-            return tuple()
-    
-        if last_n:
-            player_games = player_games.head(last_n)
-        
-        return tuple(player_games.to_records(index=False))
-    
     def get_player_stats(self, player_name: str, last_n_games: Optional[int] = None) -> Dict:
-        """Get player statistics with real variance - OPTIMIZED."""
+        """Get player statistics with real variance - SIMPLE AND DIRECT."""
         
-        # DEBUG: Log what we're fetching
-        logger.info(f"Searching for player: '{player_name}'")
-        logger.info(f"Total rows in gamelogs: {len(self.gamelogs)}")
-        if not self.gamelogs.empty:
-            unique_players = self.gamelogs['player_name'].unique()
-            logger.info(f"DEBUG: Total unique players: {len(unique_players)}")
-            logger.info(f"DEBUG: First 10 players: {unique_players[:10].tolist()}")
-        else:
-            logger.error("DEBUG:Gamelogs DataFrame is empty")
-
-        cached_games = self._get_player_games_cached(player_name, last_n_games)
+        logger.info(f"=== Searching for: '{player_name}' ===")
+        logger.info(f"Total games in cache: {len(self.gamelogs)}")
         
-        if not cached_games:
-            logger.warning(f"No game log data for {player_name}")
-            #DEBUG: Show all unique player names
-            if not self.gamelogs.empty:
-                all_players = self.gamelogs['player_name'].unique()
-                logger.info(f"Available players: {all_players[:10].tolist()}")
+        if self.gamelogs.empty:
+            logger.error("Gamelogs dataframe is EMPTY!")
             return {}
         
-        player_games = pd.DataFrame(list(cached_games))
+        # Direct case-insensitive search
+        player_games = self.gamelogs[
+            self.gamelogs['player_name'].str.lower() == player_name.lower()
+        ].copy()
+        
+        logger.info(f"Found {len(player_games)} total games for '{player_name}'")
+        
+        if player_games.empty:
+            logger.warning(f"No games found. Available players sample: {self.gamelogs['player_name'].unique()[:5].tolist()}")
+            return {}
+        
+        # Sort by date and limit
+        player_games = player_games.sort_values('date', ascending=False)
+        if last_n_games:
+            player_games = player_games.head(last_n_games)
+        
+        logger.info(f"Using {len(player_games)} games for analysis")
         
         stats = {
             'player': player_name,
@@ -156,33 +155,36 @@ class EnhancedStatsCalculator:
             'timeframe': f'Last {last_n_games} games' if last_n_games else 'Full season'
         }
         
+        # Calculate mean/std for each stat
         stat_cols = ['pts', 'ast', 'trb', 'three_p', 'stl', 'blk']
         for stat in stat_cols:
             if stat in player_games.columns:
                 values = player_games[stat].dropna()
                 if len(values) > 0:
-                    stats[f'{stat}_mean'] = round(float(np.mean(values)), 2)
-                    stats[f'{stat}_std'] = round(float(np.std(values, ddof=1)), 2)
-                    stats[f'{stat}_min'] = int(np.min(values))
-                    stats[f'{stat}_max'] = int(np.max(values))
+                    stats[f'{stat}_mean'] = round(float(values.mean()), 2)
+                    stats[f'{stat}_std'] = round(float(values.std()), 2)
+                    stats[f'{stat}_min'] = int(values.min())
+                    stats[f'{stat}_max'] = int(values.max())
         
+        # Combo stats
         if all(col in player_games.columns for col in ['pts', 'ast']):
             pa = (player_games['pts'] + player_games['ast']).dropna()
             if len(pa) > 0:
-                stats['pa_mean'] = round(float(np.mean(pa)), 2)
-                stats['pa_std'] = round(float(np.std(pa, ddof=1)), 2)
+                stats['pa_mean'] = round(float(pa.mean()), 2)
+                stats['pa_std'] = round(float(pa.std()), 2)
         
         if all(col in player_games.columns for col in ['pts', 'ast', 'trb']):
             pra = (player_games['pts'] + player_games['ast'] + player_games['trb']).dropna()
             if len(pra) > 0:
-                stats['pra_mean'] = round(float(np.mean(pra)), 2)
-                stats['pra_std'] = round(float(np.std(pra, ddof=1)), 2)
+                stats['pra_mean'] = round(float(pra.mean()), 2)
+                stats['pra_std'] = round(float(pra.std()), 2)
         
         return stats
     
     def get_rolling_average(self, player_name: str, stat: str, window: int = 10) -> float:
         """Get rolling average for last N games."""
-        return self.get_player_stats(player_name, last_n_games=window).get(f'{stat}_mean', 0.0)
+        stats = self.get_player_stats(player_name, last_n_games=window)
+        return stats.get(f'{stat}_mean', 0.0)
     
     def compare_recent_vs_season(self, player_name: str, stat: str = 'pts') -> Dict:
         """Compare recent form vs full season."""
@@ -221,15 +223,14 @@ class EnhancedStatsCalculator:
             }
         }
     
-    def clear_cache(self):
-        """Clear the LRU cache if needed."""
-        self._get_player_games_cached.cache_clear()
-    
     def close(self):
         """Return connection to pool."""
         if self.conn and EnhancedStatsCalculator._connection_pool:
-            EnhancedStatsCalculator._connection_pool.putconn(self.conn)
-            logger.info("Connection returned to pool")
+            try:
+                EnhancedStatsCalculator._connection_pool.putconn(self.conn)
+                logger.info("Connection returned to pool")
+            except:
+                pass
     
     def __del__(self):
         """Cleanup on deletion."""

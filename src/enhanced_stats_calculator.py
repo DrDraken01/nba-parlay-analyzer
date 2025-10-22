@@ -66,6 +66,7 @@ class EnhancedStatsCalculator:
     def _load_from_database(self) -> pd.DataFrame:
         """Load game logs from database with optimized query."""
         if not self.conn:
+            logger.error("No database connection available")
             return pd.DataFrame()
         
         query = """
@@ -87,6 +88,12 @@ class EnhancedStatsCalculator:
         """
         try:
             df = pd.read_sql(query, self.conn)
+
+            # Debug: Print first few rows
+            logger.info(f"Loaded {len(df)} rows from database")
+            if not df.empty:
+                logger.info(f"Sample player names: {df['player_name'].unique()[:5]}")
+                
             df['date'] = pd.to_datetime(df['date'], errors='coerce')
             
             numeric_cols = ['pts', 'ast', 'trb', 'three_p', 'stl', 'blk', 'tov', 'mp']
@@ -115,10 +122,20 @@ class EnhancedStatsCalculator:
     def get_player_stats(self, player_name: str, last_n_games: Optional[int] = None) -> Dict:
         """Get player statistics with real variance - OPTIMIZED."""
         
+        # DEBUG: Log what we're fetching
+        logger.info(f"Searching for player: '{player_name}'")
+        logger.info(f"Total rows in gamelogs: {len(self.ganmelogs)}")
+        if not self.gamelogs.empty:
+            logger.info(f"Sample player names from DB: {self.gamelogs['player_name'].unique()[:5].tolist()}")
+
         cached_games = self._get_player_games_cached(player_name, last_n_games)
         
         if not cached_games:
             logger.warning(f"No game log data for {player_name}")
+            #DEBUG: Show all unique player names
+            if not self.gamelogs.empty:
+                all_players = self.gamelogs['player_name'].unique()
+                logger.info(f"Available players: {all_players[:10].tolist()}")
             return {}
         
         player_games = pd.DataFrame(list(cached_games))

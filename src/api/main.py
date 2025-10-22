@@ -15,7 +15,7 @@ app = FastAPI(
 # CORS - Allow frontend to connect
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://localhost:3001"],  # Add your frontend URLs
+    allow_origins=["http://localhost:3000", "http://localhost:3001", "https://nba-parlay-frontend-77bu.vercel.app", "https://nba-parlay-frontend-77bu-git-main-drdraken01s-projects.vercel.app", "https://*.vercel.app"],  # Add your frontend URLs
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

@@ -124,7 +124,7 @@ class EnhancedStatsCalculator:
         
         # DEBUG: Log what we're fetching
         logger.info(f"Searching for player: '{player_name}'")
-        logger.info(f"Total rows in gamelogs: {len(self.ganmelogs)}")
+        logger.info(f"Total rows in gamelogs: {len(self.gamelogs)}")
         if not self.gamelogs.empty:
             unique_players = self.gamelogs['player_name'].unique()
             logger.info(f"DEBUG: Total unique players: {len(unique_players)}")

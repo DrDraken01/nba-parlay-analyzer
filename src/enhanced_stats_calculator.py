@@ -126,7 +126,11 @@ class EnhancedStatsCalculator:
         logger.info(f"Searching for player: '{player_name}'")
         logger.info(f"Total rows in gamelogs: {len(self.ganmelogs)}")
         if not self.gamelogs.empty:
-            logger.info(f"Sample player names from DB: {self.gamelogs['player_name'].unique()[:5].tolist()}")
+            unique_players = self.gamelogs['player_name'].unique()
+            logger.info(f"DEBUG: Total unique players: {len(unique_players)}")
+            logger.info(f"DEBUG: First 10 players: {unique_players[:10].tolist()}")
+        else:
+            logger.error("DEBUG:Gamelogs DataFrame is empty")
 
         cached_games = self._get_player_games_cached(player_name, last_n_games)
         

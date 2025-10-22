@@ -110,10 +110,16 @@ class EnhancedStatsCalculator:
     def _get_player_games_cached(self, player_name: str, last_n: Optional[int] = None) -> tuple:
         """Cache player game data to avoid repeated DataFrame operations."""
         player_games = self.gamelogs[self.gamelogs['player_name'] == player_name].copy()
-        
+        logger.info(f"DEBUG: Found {len(player_games)} games for '{player_name}'")
+
+        if player_games.empty:
+            logger.warning(f"DEBUG: No games found. Trying exact match...")
+            player_games = self.gamelogs[self.gamelogs['player_name'] == player_name]
+            logger.info(f"DEBUG: Exact match found {len(player_games)} games")
+
         if player_games.empty:
             return tuple()
-        
+    
         if last_n:
             player_games = player_games.head(last_n)
         

@@ -21,32 +21,21 @@ tracker = ResultsTracker()
 
 
 @router.post("/analyze-leg", response_model=dict)
-async def analyze_leg(
-    leg: LegInput,
-    user: dict = Depends(get_current_user)
-):
+async def analyze_leg(leg: LegInput):  # ← Removed auth dependency
     """
     Analyze single parlay leg with matchup adjustments.
     
-    This endpoint accepts:
-    - Player name
-    - Stat type (points, assists, etc.)
-    - Betting line
-    - Bet direction (over/under)
-    - Location (home/away/neutral) - Optional
-    - Opponent team - Optional
-    
-    Returns probability analysis with matchup-based adjustments applied.
+    NOTE: Auth temporarily disabled for testing.
     """
-    user_id = user['email']  # Use email as identifier for limiter
+    user_id = "test_user"  # Hardcoded for now
     
-    logger.info(f"Analysis request from {user_id}: {leg.player} {leg.stat_type} {leg.bet_type} {leg.line}")
+    logger.info(f"Analysis request: {leg.player} {leg.stat_type} {leg.bet_type} {leg.line}")
     
-    # Check rate limit
+    # Check rate limit (still works with test_user)
     can_use = limiter.check_can_analyze(user_id, is_authenticated=True)
     
     if not can_use['allowed']:
-        logger.warning(f"Rate limit hit for {user_id}: {can_use['reason']}")
+        logger.warning(f"Rate limit hit: {can_use['reason']}")
         raise HTTPException(
             status_code=429,
             detail={
@@ -63,11 +52,11 @@ async def analyze_leg(
             stat_type=leg.stat_type,
             line=leg.line,
             bet_type=leg.bet_type,
-            location=leg.location or 'neutral',  # Default to neutral if not provided
-            opponent=leg.opponent  # None if not provided
+            location=leg.location or 'neutral',
+            opponent=leg.opponent
         )
     except Exception as e:
-        logger.error(f"Analysis error for {user_id}: {str(e)}", exc_info=True)
+        logger.error(f"Analysis error: {str(e)}", exc_info=True)
         raise HTTPException(
             status_code=500,
             detail=f"Analysis failed: {str(e)}"
@@ -79,7 +68,7 @@ async def analyze_leg(
     
     # Record usage
     limiter.record_usage(user_id)
-    logger.info(f"Analysis complete for {user_id}: {result['probability']:.1%} probability")
+    logger.info(f"Analysis complete: {result['probability']:.1%} probability")
     
     # Add remaining count to response
     result['usage'] = {

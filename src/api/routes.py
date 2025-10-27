@@ -85,6 +85,20 @@ async def analyze_leg(leg: LegInput):
         'remaining': can_use['remaining'],
         'total_limit': can_use.get('total_limit', 7)
     }
+     # Auto-save to history for tracking
+    try:
+        parlay_data = {
+            'legs': [result],
+            'num_legs': 1,
+            'combined_probability': result['probability'],
+            'predicted_value': result.get('predicted_value', result['season_avg'])
+        }
+        bet_id = tracker.log_parlay(user_id, parlay_data)
+        result['bet_id'] = bet_id
+        logger.debug(f"Auto-saved to history: {bet_id}")
+    except Exception as e:
+        logger.warning(f"Failed to auto-save to history: {str(e)}")
+        # Don't fail the request if history save fails
     
     return result
 
@@ -238,3 +252,120 @@ async def root():
         ],
         "documentation": "/docs"
     }
+
+@router.get("/history", response_model=list)
+async def get_bet_history(limit: int = 20):
+    """
+    Get user's bet history.
+    
+    Returns most recent analyses with their results.
+    """
+    user_id = "test_user"
+    
+    try:
+        history = tracker.get_recent_results(user_id, limit=limit)
+        logger.debug(f"Retrieved {len(history)} historical bets for {user_id}")
+        return history
+    except Exception as e:
+        logger.error(f"Error retrieving history: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to retrieve bet history")
+
+
+@router.post("/history/save")
+async def save_bet_to_history(bet_data: dict):
+    """
+    Manually save a bet to history.
+    
+    This is called automatically after each analysis,
+    but can also be called manually if needed.
+    """
+    user_id = "test_user"
+    
+    try:
+        parlay_id = tracker.log_parlay(user_id, bet_data)
+        logger.info(f"Saved bet to history: {parlay_id}")
+        return {
+            "success": True,
+            "parlay_id": parlay_id,
+            "message": "Bet saved to history"
+        }
+    except Exception as e:
+        logger.error(f"Error saving to history: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to save bet")
+
+
+@router.put("/history/{bet_id}/result")
+async def mark_bet_result(
+    bet_id: str,
+    won: bool,
+    wager: float = 0,
+    payout: float = 0
+):
+    """
+    Mark a bet as won or lost.
+    
+    Args:
+    - bet_id: The parlay_id from the original analysis
+    - won: True if bet won, False if lost
+    - wager: Amount wagered (optional)
+    - payout: Amount won (optional, only if won=True)
+    """
+    user_id = "test_user"
+    
+    try:
+        tracker.update_result(user_id, bet_id, won, wager, payout)
+        logger.info(f"Updated bet {bet_id}: {'WON' if won else 'LOST'}")
+        
+        return {
+            "success": True,
+            "bet_id": bet_id,
+            "result": "won" if won else "lost",
+            "message": f"Bet marked as {'won' if won else 'lost'}"
+        }
+    except Exception as e:
+        logger.error(f"Error updating result: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to update bet result")
+
+
+@router.get("/history/stats")
+async def get_performance_stats():
+    """
+    Get user's betting performance statistics.
+    
+    Returns:
+    - Win/loss record
+    - Win rate vs predicted win rate
+    - Total wagered, returned, profit/loss
+    - ROI
+    - Reality check messages
+    """
+    user_id = "test_user"
+    
+    try:
+        stats = tracker.get_performance_summary(user_id)
+        logger.debug(f"Performance stats: {stats.get('wins', 0)}W-{stats.get('losses', 0)}L")
+        return stats
+    except Exception as e:
+        logger.error(f"Error getting performance stats: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to retrieve statistics")
+
+
+@router.delete("/history/clear")
+async def clear_history():
+    """
+    Clear all bet history for user.
+    
+    WARNING: This cannot be undone.
+    """
+    user_id = "test_user"
+    
+    try:
+        # This would need to be implemented in results_tracker.py
+        logger.warning(f"History clear requested for {user_id}")
+        return {
+            "message": "History clear not yet implemented",
+            "status": "pending"
+        }
+    except Exception as e:
+        logger.error(f"Error clearing history: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to clear history")

@@ -49,4 +49,4 @@ uvloop==0.21.0
 watchfiles==1.1.0
 webencodings==0.5.1
 websockets==15.0.1
-
+psycopg2-binary

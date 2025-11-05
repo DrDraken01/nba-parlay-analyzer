@@ -5,7 +5,7 @@ Add these to your main FastAPI app
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from typing import List, Optional
-from bet_history_db_postgres import BetHistoryDB
+from .bet_history_db_postgres import BetHistoryDB
 
 # Initialize database
 bet_db = BetHistoryDB()

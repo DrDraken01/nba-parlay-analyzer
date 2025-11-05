@@ -5,7 +5,7 @@ Main FastAPI application
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from src.api import auth, routes
-from src.bet_history_endpoints import router as bet_history_router  # ← Changed: added src.
+from ..bet_history_endpoints import router as bet_history_router # ← Import the bet history router
 
 app = FastAPI(
     title="NBA Parlay Analyzer API",
@@ -31,7 +31,7 @@ app.add_middleware(
 # Include routers
 app.include_router(auth.router, prefix="/auth", tags=["Authentication"])
 app.include_router(routes.router, prefix="/api", tags=["Analysis"])
-app.include_router(bet_history_router)  # ← Added: bet history routes
+app.include_router(bet_history_router)  # ← Bet history routes
 
 @app.get("/")
 def root():

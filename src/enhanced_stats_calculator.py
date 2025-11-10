@@ -1,6 +1,7 @@
 """
 Enhanced Stats Calculator - Database Version
 Simplified for reliability - no complex caching
+UPDATED: Now supports both DATABASE_URL and individual PG* environment variables
 """
 
 import pandas as pd
@@ -19,7 +20,7 @@ class EnhancedStatsCalculator:
     """Calculate stats using database - simplified and reliable."""
     
     _connection_pool = None
-    _pool_version = "v4"
+    _pool_version = "v5"  # Incremented version for DATABASE_URL support
     _current_version = None
     
     def __init__(self):
@@ -35,30 +36,41 @@ class EnhancedStatsCalculator:
                     except:
                         pass
                 
-                host = os.getenv('PGHOST')
-                port = os.getenv('PGPORT', '5432')
-                user = os.getenv('PGUSER')
-                password = os.getenv('PGPASSWORD')
-                dbname = os.getenv('PGDATABASE')
+                # Try DATABASE_URL first (Railway standard), then fall back to individual vars
+                database_url = os.getenv('DATABASE_URL')
+                
+                if database_url:
+                    # Railway uses postgres:// but psycopg2 needs postgresql://
+                    if database_url.startswith('postgres://'):
+                        database_url = database_url.replace('postgres://', 'postgresql://', 1)
+                    logger.info(f"Using DATABASE_URL for connection")
+                else:
+                    # Fall back to individual environment variables
+                    host = os.getenv('PGHOST')
+                    port = os.getenv('PGPORT', '5432')
+                    user = os.getenv('PGUSER')
+                    password = os.getenv('PGPASSWORD')
+                    dbname = os.getenv('PGDATABASE')
+                    
+                    if all([host, user, password, dbname]):
+                        database_url = f"postgresql://{user}:{password}@{host}:{port}/{dbname}"
+                        logger.info(f"Using individual PG* vars for connection to {host}")
+                    else:
+                        missing = []
+                        if not host: missing.append("PGHOST")
+                        if not user: missing.append("PGUSER")
+                        if not password: missing.append("PGPASSWORD")
+                        if not dbname: missing.append("PGDATABASE")
+                        raise ValueError(f"Missing database credentials: {', '.join(missing)}")
                 
                 logger.info(f"Creating new connection pool (version {self._pool_version})")
                 
-                if all([host, user, password, dbname]):
-                    database_url = f"postgresql://{user}:{password}@{host}:{port}/{dbname}"
-                    
-                    EnhancedStatsCalculator._connection_pool = psycopg2.pool.SimpleConnectionPool(
-                        1, 10,
-                        database_url
-                    )
-                    EnhancedStatsCalculator._current_version = self._pool_version
-                    logger.info(f"Successfully connected to database at {host}")
-                else:
-                    missing = []
-                    if not host: missing.append("PGHOST")
-                    if not user: missing.append("PGUSER")
-                    if not password: missing.append("PGPASSWORD")
-                    if not dbname: missing.append("PGDATABASE")
-                    raise ValueError(f"Missing database credentials: {', '.join(missing)}")
+                EnhancedStatsCalculator._connection_pool = psycopg2.pool.SimpleConnectionPool(
+                    1, 10,
+                    database_url
+                )
+                EnhancedStatsCalculator._current_version = self._pool_version
+                logger.info(f"Successfully connected to database")
             
             self.conn = EnhancedStatsCalculator._connection_pool.getconn()
             self._gamelogs_cache = None
@@ -139,50 +151,45 @@ class EnhancedStatsCalculator:
         logger.info(f"Found {len(player_games)} total games for '{player_name}'")
         
         if player_games.empty:
-            logger.warning(f"No games found. Available players sample: {self.gamelogs['player_name'].unique()[:5].tolist()}")
+            logger.warning(f"No games found. Available players sample: {self.gamelogs['player_name'].unique()[:20].tolist()}")
             return {}
         
-        # Sort by date and limit
-        player_games = player_games.sort_values('date', ascending=False)
+        # Limit to last N games if specified
         if last_n_games:
             player_games = player_games.head(last_n_games)
         
-        logger.info(f"Using {len(player_games)} games for analysis")
+        games_analyzed = len(player_games)
         
+        # Calculate stats for all stat types
         stats = {
-            'player': player_name,
-            'games_analyzed': len(player_games),
-            'timeframe': f'Last {last_n_games} games' if last_n_games else 'Full season'
+            'player_name': player_name,
+            'games_analyzed': games_analyzed,
         }
         
-        # Calculate mean/std for each stat
-        stat_cols = ['pts', 'ast', 'trb', 'three_p', 'stl', 'blk']
-        for stat in stat_cols:
-            if stat in player_games.columns:
-                values = player_games[stat].dropna()
+        stat_columns = {
+            'points': 'pts',
+            'assists': 'ast',
+            'rebounds': 'trb',
+            'threes': 'three_p',
+            'steals': 'stl',
+            'blocks': 'blk',
+            'turnovers': 'tov'
+        }
+        
+        for stat_name, col_name in stat_columns.items():
+            if col_name in player_games.columns:
+                values = player_games[col_name].dropna()
                 if len(values) > 0:
-                    stats[f'{stat}_mean'] = round(float(values.mean()), 2)
-                    stats[f'{stat}_std'] = round(float(values.std()), 2)
-                    stats[f'{stat}_min'] = int(values.min())
-                    stats[f'{stat}_max'] = int(values.max())
-        
-        # Combo stats
-        if all(col in player_games.columns for col in ['pts', 'ast']):
-            pa = (player_games['pts'] + player_games['ast']).dropna()
-            if len(pa) > 0:
-                stats['pa_mean'] = round(float(pa.mean()), 2)
-                stats['pa_std'] = round(float(pa.std()), 2)
-        
-        if all(col in player_games.columns for col in ['pts', 'ast', 'trb']):
-            pra = (player_games['pts'] + player_games['ast'] + player_games['trb']).dropna()
-            if len(pra) > 0:
-                stats['pra_mean'] = round(float(pra.mean()), 2)
-                stats['pra_std'] = round(float(pra.std()), 2)
+                    stats[f'{stat_name}_mean'] = float(values.mean())
+                    stats[f'{stat_name}_std'] = float(values.std())
+                    stats[f'{stat_name}_median'] = float(values.median())
+                    stats[f'{stat_name}_min'] = float(values.min())
+                    stats[f'{stat_name}_max'] = float(values.max())
         
         return stats
     
-    def get_rolling_average(self, player_name: str, stat: str, window: int = 10) -> float:
-        """Get rolling average for last N games."""
+    def get_rolling_average(self, player_name: str, stat: str = 'pts', window: int = 10) -> float:
+        """Get rolling average for a player's stat."""
         stats = self.get_player_stats(player_name, last_n_games=window)
         return stats.get(f'{stat}_mean', 0.0)
     
